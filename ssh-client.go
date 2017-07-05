@@ -3,11 +3,13 @@ package sshclient
 import (
 	"fmt"
 	"net"
+	"path/filepath"
 	"time"
 
 	sshagent "github.com/bowlhat/ssh-agent"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // SSHConnection ...
@@ -22,25 +24,42 @@ type TCPConnection struct {
 	Connection net.Conn
 }
 
-// New make new ssh client connection
+// New ssh client connection
 func New(hostname string, port int, username string, password string) (client *SSHConnection, err error) {
 	addr := fmt.Sprintf("%s:%d", hostname, port)
 	auth := makeAuth(username, password)
 
-	tcp, err := makeTCP(addr, 90)
-	if err != nil {
-		return nil, err
+	if username == "" {
+		username = CurrentUser()
 	}
 
-	ssh, err := tcp.makeSSHConn(addr, auth)
+	hostsfile := filepath.Join(HomeDir(), ".ssh", "known_hosts")
+
+	callback, err := knownhosts.New(hostsfile)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Could not create a known_hosts file parser: %v", err)
+	}
+
+	config := ssh.ClientConfig{
+		User:            username,
+		Auth:            auth,
+		HostKeyCallback: callback,
+	}
+
+	tcp, err := makeTCP(addr, 90)
+	if err != nil {
+		return nil, fmt.Errorf("Cannot connect to %q: %v", hostname, err)
+	}
+
+	ssh, err := tcp.makeSSHConn(addr, &config)
+	if err != nil {
+		return nil, fmt.Errorf("Cannot start SSH subsystem: %v", err)
 	}
 
 	return ssh, nil
 }
 
-func makeAuth(username string, password string) *ssh.ClientConfig {
+func makeAuth(username string, password string) []ssh.AuthMethod {
 	var authmethods []ssh.AuthMethod
 	if agent := sshagent.New(); agent != nil {
 		authmethods = append(authmethods, ssh.PublicKeysCallback(agent))
@@ -48,10 +67,7 @@ func makeAuth(username string, password string) *ssh.ClientConfig {
 	if password != "" {
 		authmethods = append(authmethods, ssh.Password(password))
 	}
-	return &ssh.ClientConfig{
-		User: username,
-		Auth: authmethods,
-	}
+	return authmethods
 }
 
 func makeTCP(addr string, timeout time.Duration) (connection *TCPConnection, err error) {
@@ -74,12 +90,12 @@ func (tcp *TCPConnection) makeSSHConn(addr string, auth *ssh.ClientConfig) (conn
 	return &SSHConnection{Client: client, SSHConn: conn, TCPConn: tcp}, nil
 }
 
-// Close Close the TCP connection
+// Close the TCP connection
 func (tcp *TCPConnection) Close() error {
 	return tcp.Connection.Close()
 }
 
-// Close close the SSH session
+// Close the SSH session
 func (ssh *SSHConnection) Close() error {
 	if err := ssh.Client.Close(); err != nil {
 		return err
